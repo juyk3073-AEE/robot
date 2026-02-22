@@ -9,7 +9,7 @@ obs, _ = test_env.reset()
 
 # 2. 파일 I/O 업데이트: V4 모델 로드
 print("ppo_leg_balancer_v4.zip 모델을 불러옵니다...")
-model = PPO.load("ppo_leg_balancer_v4")
+model = PPO.load("ppo_leg_balancer_v5")
 
 print("AI 제어 시작!")
 while True:

@@ -34,45 +34,35 @@ class Leg2DofEnv(gym.Env):
             numSolverIterations=100,
             physicsClientId=self.client
         )
-        # 바닥 생성 및 트램펄린 현상 억제 (restitution=0)
-        floor_shape = p.createCollisionShape(
-            p.GEOM_BOX,
-            halfExtents=[5, 5, 0.5],
-            physicsClientId=self.client
-        )
+        
+        # [수정 1] leg_2dof_4.py와 동일하게 친숙한 plane.urdf 사용
+        planeId = p.loadURDF("plane.urdf", physicsClientId=self.client)
+        p.changeDynamics(planeId, -1, lateralFriction=2.0, restitution=0.0, physicsClientId=self.client)
 
-        p.createMultiBody(
-            baseMass=0,
-            baseCollisionShapeIndex=floor_shape,
-            basePosition=[0, 0, -0.5],
-            physicsClientId=self.client
-        )
-
-        startPos = [0, 0, 0.75] 
+        # 다리 전체 길이가 0.6m이므로, 지면에 살짝 닿을 듯한 0.65m에서 스폰
+        startPos = [0, 0, 1] 
         self.robotId = p.loadURDF(self.urdf_path, startPos, useFixedBase=False, physicsClientId=self.client)
         
-        # [수정 1] 모터 토크 인가 전 조인트 강제 정렬
+        # 관절 위치 강제 0점 정렬
         p.resetJointState(self.robotId, 0, targetValue=0, physicsClientId=self.client)
         p.resetJointState(self.robotId, 1, targetValue=0, physicsClientId=self.client)
         
-        # [수정 3] 로봇 전체 링크의 마찰력 극대화 및 반발력 제거
         for j in range(-1, p.getNumJoints(self.robotId, physicsClientId=self.client)):
             p.changeDynamics(
                 self.robotId, j, 
                 lateralFriction=2.0,
-                spinningFriction=0.1,
-                rollingFriction=0.1,
                 restitution=0.0,
                 linearDamping=0.04,
                 angularDamping=0.04,
                 physicsClientId=self.client
             )
             
-        # 모터 개입 없이 물리적 안정화 50스텝 대기
-        p.setJointMotorControl2(self.robotId, 0, p.VELOCITY_CONTROL, force=0, physicsClientId=self.client)
-        p.setJointMotorControl2(self.robotId, 1, p.VELOCITY_CONTROL, force=0, physicsClientId=self.client)
+        # [수정 2] 핵심 버그 픽스: 대기 시간 동안 모터를 켜서 주저앉지 않고 꼿꼿이 버티게 만듦
+        p.setJointMotorControl2(self.robotId, 0, p.POSITION_CONTROL, targetPosition=0, force=50, physicsClientId=self.client)
+        p.setJointMotorControl2(self.robotId, 1, p.POSITION_CONTROL, targetPosition=0, force=50, physicsClientId=self.client)
         
-        for _ in range(120):
+        # 50 프레임만 대기하여 착지 충격만 흡수
+        for _ in range(50):
             p.stepSimulation(physicsClientId=self.client)
             
         return self._get_obs(), {}
@@ -85,17 +75,14 @@ class Leg2DofEnv(gym.Env):
         hip_state = p.getJointState(self.robotId, 0, physicsClientId=self.client)[0]
         knee_state = p.getJointState(self.robotId, 1, physicsClientId=self.client)[0]
         
-        # [수정 4] Pitch 중복 제거 및 각속도(ang_vel) 정상 복구
         return np.array([base_euler[1], base_ang_vel[1], hip_state, knee_state], dtype=np.float32)
 
     def step(self, action):
-        # [수정 4] 초기 스텝 보호: 무작위 전력 질주 킥 방지를 위한 액션 클리핑
         action = np.clip(action, -0.3, 0.3)
         
         hip_target = action[0] * 1.57
         knee_target = -abs(action[1] * 2.5)
         
-        # [수정 4] Force 하향 조정 (폭발 방지)
         p.setJointMotorControl2(self.robotId, 0, p.POSITION_CONTROL, targetPosition=hip_target, force=20, physicsClientId=self.client)
         p.setJointMotorControl2(self.robotId, 1, p.POSITION_CONTROL, targetPosition=knee_target, force=20, physicsClientId=self.client)
         
@@ -111,6 +98,7 @@ class Leg2DofEnv(gym.Env):
         terminated = False
         reward = 1.0 
         
+        # 사망 조건
         if abs(pitch) > 0.5 or abs(roll) > 0.5 or z_height < 0.25:
             terminated = True
             reward = -20.0 
@@ -141,7 +129,7 @@ if __name__ == "__main__":
         name_prefix='rl_model'
     )
     
-    model_name = "ppo_leg_balancer_v4"
+    model_name = "ppo_leg_balancer_v5"
     model_file = f"{model_name}.zip"
     
     if os.path.exists(model_file):
@@ -152,7 +140,7 @@ if __name__ == "__main__":
         model = PPO("MlpPolicy", vec_env, verbose=1, learning_rate=0.0003)
     
     try:
-        model.learn(total_timesteps=500000, reset_num_timesteps=False, callback=checkpoint_callback)
+        model.learn(total_timesteps=500, reset_num_timesteps=False, callback=checkpoint_callback)
         model.save(model_name)
         print(f"\n최종 학습 완료! {model_file} 저장됨.")
     except KeyboardInterrupt:
