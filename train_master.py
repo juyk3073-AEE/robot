@@ -21,7 +21,7 @@ class Leg2DofEnv(gym.Env):
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        self.urdf_path = os.path.join(current_dir, "leg_2dof.urdf")
+        self.urdf_path = os.path.join(current_dir, "leg_2dof_4.urdf")
         self.robotId = None
 
     def reset(self, seed=None, options=None):
