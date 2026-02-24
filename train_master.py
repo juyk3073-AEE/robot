@@ -140,7 +140,7 @@ if __name__ == "__main__":
         model = PPO("MlpPolicy", vec_env, verbose=1, learning_rate=0.0003)
     
     try:
-        model.learn(total_timesteps=500, reset_num_timesteps=False, callback=checkpoint_callback)
+        model.learn(total_timesteps=100000, reset_num_timesteps=False, callback=checkpoint_callback)
         model.save(model_name)
         print(f"\n최종 학습 완료! {model_file} 저장됨.")
     except KeyboardInterrupt:
