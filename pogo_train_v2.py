@@ -12,7 +12,6 @@ from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.monitor import Monitor
 
 blueprint = "blueprint_leg_2dof_v2.urdf"
-
 class Leg2DofEnv(gym.Env):
     def __init__(self, render=False):
         super(Leg2DofEnv, self).__init__()
