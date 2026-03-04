@@ -6,10 +6,11 @@ import pybullet_data
 import os
 import torch
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import SubprocVecEnv
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.monitor import Monitor
+from typing import Callable # 타입 힌트 추가
 
 blueprint = "blueprint_leg_2dof_v2.urdf"
 class Leg2DofEnv(gym.Env):
@@ -102,12 +103,22 @@ class Leg2DofEnv(gym.Env):
         roll = p.getEulerFromQuaternion(base_orn)[0]
         
         terminated = False
+        # [수정 후: 이렇게 바꿔주세요]
+        reward = 1.0  # 살아있는 매 순간 +1점 (이게 제일 중요함)
         
-        # [고도화 4] 다중 보상 함수 설계
-        reward = 1.0                              # 기본 생존 보상
-        reward += np.exp(-5.0 * pitch**2)         # Pitch가 0(수직)에 가까울수록 기하급수적 보상 획득
-        reward += z_height * 2.0                  # 주저앉지 않고 높은 고도를 유지할수록 가산점
-        reward -= 0.1 * np.sum(np.square(action)) # 모터를 과도하게 튕기는 행위(에너지 낭비) 페널티
+        # 1. 수직 유지 보상 (기울지 않으면 점수 폭발)
+        reward += np.exp(-5.0 * pitch**2) * 3.0 
+        
+        # 2. 제자리 유지 보상 (X축 전후 속도가 0에 가까우면 점수)
+        # 로봇이 썰매 타듯 미끄러지지 않게 잡아줍니다.
+        x_vel = obs[2] 
+        reward += np.exp(-2.0 * x_vel**2) 
+        
+        # 3. [핵심] 높이 보상(z_height) 삭제! 
+        # 이제 무릎을 굽혀도 점수가 깎이지 않으므로, 넘어지려 할 때 무릎을 써서 버티기 시작합니다.
+
+        # 4. 에너지 페널티 감소 (너무 큰 페널티는 움직임을 위축시킴)
+        reward -= 0.01 * np.sum(np.square(action))
         
         # 사망 조건
         if abs(pitch) > 0.5 or abs(roll) > 0.5 or z_height < 0.25:
@@ -125,21 +136,36 @@ def make_env(rank, seed=0):
     set_random_seed(seed)
     return _init
 
+def linear_schedule(initial_value: float) -> Callable[[float], float]:
+    """
+    학습 진행률(progress_remaining: 1.0 -> 0.0)에 따라 학습률을 선형적으로 감소시킵니다.
+    """
+    def func(progress_remaining: float) -> float:
+        return progress_remaining * initial_value
+    return func
+
 if __name__ == "__main__":
     num_cpu = max(1, os.cpu_count() // 2)
     torch.set_num_threads(1) 
     
-    print(f"[{num_cpu} 코어 할당] 강화된 보상/관측 기반 병렬 학습 시작.")
+    print(f"[{num_cpu} 코어 할당] 안정성을 위한 스케줄링 학습 시작.")
     
+    # 훈련용 환경
     vec_env = SubprocVecEnv([make_env(i) for i in range(num_cpu)])
+    # 평가용 환경 (가장 성능이 좋을 때를 기록하기 위한 독립 환경)
+    eval_env = DummyVecEnv([make_env(99)])
     
-    checkpoint_callback = CheckpointCallback(
-        save_freq=100000 // num_cpu, 
-        save_path='./checkpoints/',
-        name_prefix='rl_model'
+    # 1. 최고 성능 모델 자동 저장 콜백 (붕괴 대비용 보험)
+    eval_callback = EvalCallback(
+        eval_env, 
+        best_model_save_path='./best_model/',
+        log_path='./logs/', 
+        eval_freq=50000 // num_cpu, # 주기적으로 평가
+        deterministic=True, 
+        render=False
     )
     
-    model_name = "ppo_leg_balancer_v3"
+    model_name = "ppo_leg_balancer_v5" 
     model_file = f"{model_name}.zip"
     
     if os.path.exists(model_file):
@@ -147,13 +173,16 @@ if __name__ == "__main__":
         model = PPO.load(model_file, env=vec_env)
     else:
         print("-> 신규 학습 시작")
-        # 네트워크 크기 확장: 은닉층 [128, 128]로 늘려 복잡한 센서 데이터 처리력 강화
         policy_kwargs = dict(activation_fn=torch.nn.Tanh, net_arch=[128, 128])
-        model = PPO("MlpPolicy", vec_env, verbose=1, learning_rate=0.0003, policy_kwargs=policy_kwargs)
+        # [수정] 고정 학습률 대신 점진적 감소(Linear Schedule) 적용
+        model = PPO("MlpPolicy", vec_env, verbose=1, 
+                    learning_rate=linear_schedule(0.0003), 
+                    policy_kwargs=policy_kwargs)
     
     try:
-        model.learn(total_timesteps=500000, reset_num_timesteps=False, callback=checkpoint_callback)
+        # 학습량은 100만~200만 번으로 줄이는 것을 권장합니다. (예: 2000000)
+        model.learn(total_timesteps=50000, reset_num_timesteps=False, callback=eval_callback)
         model.save(model_name)
         print(f"\n최종 학습 완료! {model_file} 저장됨.")
     except KeyboardInterrupt:
-        print("\n종료됨. 체크포인트 확인 요망.")
+        print("\n종료됨. 최고 모델은 '.ppo_leg_balancer_v3.zip'에 저장되어 있습니다.")
