@@ -1,3 +1,11 @@
 git add .
 git commit -m "수정 내용 요약"
 git push
+
+
+
+
+
+<limit lower="-2.5" upper="0.0" effort="50.0" velocity="5.0"/>
+
+<limit lower="-2.5" upper="2.5" effort="50.0" velocity="5.0"/>
