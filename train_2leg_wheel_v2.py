@@ -40,7 +40,8 @@ class Leg2WheelEnv(gym.Env):
         planeId = p.loadURDF("plane.urdf", physicsClientId=self.client)
         p.changeDynamics(planeId, -1, lateralFriction=1.5, physicsClientId=self.client)
 
-        self.robotId = p.loadURDF(self.urdf_path, [0, 0, 0.7], useFixedBase=False, physicsClientId=self.client)
+        # 1. 지면 파묻힘(Penetration) 폭발을 막기 위해 0.72m에서 스폰
+        self.robotId = p.loadURDF(self.urdf_path, [0, 0, 0.72], useFixedBase=False, physicsClientId=self.client)
         
         self.joint_indices = {}
         for i in range(p.getNumJoints(self.robotId, physicsClientId=self.client)):
@@ -48,13 +49,18 @@ class Leg2WheelEnv(gym.Env):
             self.joint_indices[name] = i
             p.changeDynamics(self.robotId, i, lateralFriction=1.5, physicsClientId=self.client)
             
-        # [핵심 수정] 낙하하는 50프레임 동안 다리가 무너지지 않도록 0.55m 높이 자세로 모터 락(Lock)
+        # 2. 다리 완전 폄 상태(0.71m)로 목표 각도 세팅
         target_height = 0.71
         D = np.clip(target_height - 0.11, 0.01, 0.6)
         cos_val = np.clip((D**2 - 0.18) / 0.18, -1.0, 1.0)
         knee_target = -math.acos(cos_val)
         hip_target = -knee_target / 2.0
         
+        # 관절 각도 강제 주입
+        for j in ['hip_left_joint', 'hip_right_joint']: p.resetJointState(self.robotId, self.joint_indices[j], hip_target, physicsClientId=self.client)
+        for j in ['knee_left_joint', 'knee_right_joint']: p.resetJointState(self.robotId, self.joint_indices[j], knee_target, physicsClientId=self.client)
+        for j in ['wheel_left_joint', 'wheel_right_joint']: p.resetJointState(self.robotId, self.joint_indices[j], 0.0, targetVelocity=0.0, physicsClientId=self.client)
+
         p.setJointMotorControlArray(
             self.robotId, 
             jointIndices=[self.joint_indices['hip_left_joint'], self.joint_indices['hip_right_joint'], self.joint_indices['knee_left_joint'], self.joint_indices['knee_right_joint']],
@@ -64,9 +70,22 @@ class Leg2WheelEnv(gym.Env):
             physicsClientId=self.client
         )
         
-        # 다리에 힘이 들어간 상태로 바닥에 안착할 때까지 대기
+        p.setJointMotorControlArray(
+            self.robotId,
+            jointIndices=[self.joint_indices['wheel_left_joint'], self.joint_indices['wheel_right_joint']],
+            controlMode=p.VELOCITY_CONTROL,
+            targetVelocities=[0, 0],
+            forces=[15, 15],
+            physicsClientId=self.client
+        )
+        
+        # 3. 50프레임 안정화 중 물리적 측면 폭발(Roll) 원천 차단
         for _ in range(50):
             p.stepSimulation(physicsClientId=self.client)
+            pos, _ = p.getBasePositionAndOrientation(self.robotId, physicsClientId=self.client)
+            # X, Y 이동과 회전(Orientation)을 강제로 0으로 묶고, Z축 낙하만 허용 (텔레포트 락)
+            p.resetBasePositionAndOrientation(self.robotId, [0, 0, pos[2]], [0, 0, 0, 1], physicsClientId=self.client)
+            p.resetBaseVelocity(self.robotId, [0, 0, 0], [0, 0, 0], physicsClientId=self.client)
             
         return self._get_obs(), {}
 

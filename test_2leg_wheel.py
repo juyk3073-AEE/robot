@@ -26,7 +26,7 @@ class TestLeg2WheelEnv(gym.Env):
         self.urdf_path = os.path.join(WORK_DIR, blueprint)
         self.robotId = p.loadURDF(self.urdf_path, [0, 0, 0.75], useFixedBase=False, physicsClientId=self.client)
 
-    def reset(self, seed=None, options=None):
+def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         p.resetSimulation(self.client)
         p.setGravity(0, 0, -9.81, physicsClientId=self.client)
@@ -35,7 +35,8 @@ class TestLeg2WheelEnv(gym.Env):
         planeId = p.loadURDF("plane.urdf", physicsClientId=self.client)
         p.changeDynamics(planeId, -1, lateralFriction=1.5, physicsClientId=self.client)
 
-        self.robotId = p.loadURDF(self.urdf_path, [0, 0, 0.7], useFixedBase=False, physicsClientId=self.client)
+        # 1. 지면 파묻힘(Penetration) 폭발을 막기 위해 0.72m에서 스폰
+        self.robotId = p.loadURDF(self.urdf_path, [0, 0, 0.72], useFixedBase=False, physicsClientId=self.client)
         
         self.joint_indices = {}
         for i in range(p.getNumJoints(self.robotId, physicsClientId=self.client)):
@@ -43,13 +44,18 @@ class TestLeg2WheelEnv(gym.Env):
             self.joint_indices[name] = i
             p.changeDynamics(self.robotId, i, lateralFriction=1.5, physicsClientId=self.client)
             
-        # [충돌 방지] 자유낙하 시 죽지 않도록 초기 50프레임 동안 자세 락(Lock)
-        target_height = 0.55
+        # 2. 다리 완전 폄 상태(0.71m)로 목표 각도 세팅
+        target_height = 0.71
         D = np.clip(target_height - 0.11, 0.01, 0.6)
         cos_val = np.clip((D**2 - 0.18) / 0.18, -1.0, 1.0)
         knee_target = -math.acos(cos_val)
         hip_target = -knee_target / 2.0
         
+        # 관절 각도 강제 주입
+        for j in ['hip_left_joint', 'hip_right_joint']: p.resetJointState(self.robotId, self.joint_indices[j], hip_target, physicsClientId=self.client)
+        for j in ['knee_left_joint', 'knee_right_joint']: p.resetJointState(self.robotId, self.joint_indices[j], knee_target, physicsClientId=self.client)
+        for j in ['wheel_left_joint', 'wheel_right_joint']: p.resetJointState(self.robotId, self.joint_indices[j], 0.0, targetVelocity=0.0, physicsClientId=self.client)
+
         p.setJointMotorControlArray(
             self.robotId, 
             jointIndices=[self.joint_indices['hip_left_joint'], self.joint_indices['hip_right_joint'], self.joint_indices['knee_left_joint'], self.joint_indices['knee_right_joint']],
@@ -59,66 +65,24 @@ class TestLeg2WheelEnv(gym.Env):
             physicsClientId=self.client
         )
         
-        for _ in range(50):
-            p.stepSimulation(physicsClientId=self.client)
-            
-        return self._get_obs(), {}
-
-    def _get_obs(self):
-        base_pos, base_orn = p.getBasePositionAndOrientation(self.robotId, physicsClientId=self.client)
-        base_euler = p.getEulerFromQuaternion(base_orn)
-        base_vel, base_ang_vel = p.getBaseVelocity(self.robotId, physicsClientId=self.client)
-        
-        return np.array([
-            base_euler[1], base_ang_vel[1], 
-            base_vel[0], base_pos[2], base_vel[2]
-        ], dtype=np.float32)
-
-    def step(self, action):
-        # [테스트 전용] 학습 시 고정되었던 높이를 해제하여 사용자의 슬라이더(action[0]) 입력을 받음
-        target_height = 0.485 + action[0] * 0.225
-        wheel_vel = action[1] * 20.0
-        
-        D = np.clip(target_height - 0.11, 0.01, 0.6)
-        cos_val = np.clip((D**2 - 0.18) / 0.18, -1.0, 1.0)
-        knee_target = -math.acos(cos_val)
-        hip_target = -knee_target / 2.0
-        
-        p.setJointMotorControlArray(
-            self.robotId, 
-            jointIndices=[self.joint_indices['hip_left_joint'], self.joint_indices['hip_right_joint'], self.joint_indices['knee_left_joint'], self.joint_indices['knee_right_joint']],
-            controlMode=p.POSITION_CONTROL,
-            targetPositions=[hip_target, hip_target, knee_target, knee_target],
-            forces=[50, 50, 50, 50],
-            physicsClientId=self.client
-        )
         p.setJointMotorControlArray(
             self.robotId,
             jointIndices=[self.joint_indices['wheel_left_joint'], self.joint_indices['wheel_right_joint']],
             controlMode=p.VELOCITY_CONTROL,
-            targetVelocities=[wheel_vel, wheel_vel],
+            targetVelocities=[0, 0],
             forces=[15, 15],
             physicsClientId=self.client
         )
         
-        for _ in range(4):
+        # 3. 50프레임 안정화 중 물리적 측면 폭발(Roll) 원천 차단
+        for _ in range(50):
             p.stepSimulation(physicsClientId=self.client)
-        
-        obs = self._get_obs()
-        pitch, x_vel, z_height = obs[0], obs[2], obs[3]
-        base_orn = p.getBasePositionAndOrientation(self.robotId, physicsClientId=self.client)[1]
-        roll = p.getEulerFromQuaternion(base_orn)[0]
-        
-        terminated = False
-        reward = 1.0 
-        
-        # 사망 조건 (v2 기준 반영)
-        if abs(pitch) > 1.5 or abs(roll) > 1.5 or z_height < 0.01:
-            terminated = True
-            reward = -20.0 
+            pos, _ = p.getBasePositionAndOrientation(self.robotId, physicsClientId=self.client)
+            # X, Y 이동과 회전(Orientation)을 강제로 0으로 묶고, Z축 낙하만 허용 (텔레포트 락)
+            p.resetBasePositionAndOrientation(self.robotId, [0, 0, pos[2]], [0, 0, 0, 1], physicsClientId=self.client)
+            p.resetBaseVelocity(self.robotId, [0, 0, 0], [0, 0, 0], physicsClientId=self.client)
             
-        return obs, reward, terminated, False, {}
-
+        return self._get_obs(), {}
 
 # --- 메인 실행부 ---
 if __name__ == "__main__":
@@ -135,7 +99,7 @@ if __name__ == "__main__":
     # 1.0 입력 시 완벽한 수동 개입 모드 동작
     mode_slider = p.addUserDebugParameter("Manual Height Override (0=AI, 1=Manual)", 0, 1, 1)
     height_slider = p.addUserDebugParameter("Target Body Height (m)", 0.26, 0.71, 0.71)
-    
+
     print("\nAI 제어 시작! 슬라이더를 1.0으로 맞추고 로봇의 높이를 제어하세요.")
 
 while True:
