@@ -1,3 +1,5 @@
+# 가만히 중심잡기
+
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -86,7 +88,7 @@ class Leg2WheelEnv(gym.Env):
             # X, Y 이동과 회전(Orientation)을 강제로 0으로 묶고, Z축 낙하만 허용 (텔레포트 락)
             p.resetBasePositionAndOrientation(self.robotId, [0, 0, pos[2]], [0, 0, 0, 1], physicsClientId=self.client)
             p.resetBaseVelocity(self.robotId, [0, 0, 0], [0, 0, 0], physicsClientId=self.client)
-            
+        self.current_step = 0 # [추가] 에피소드 스텝 카운터 초기화            
         return self._get_obs(), {}
 
     def _get_obs(self):
@@ -132,12 +134,15 @@ class Leg2WheelEnv(gym.Env):
         for _ in range(4):
             p.stepSimulation(physicsClientId=self.client)
         
+        self.current_step += 1 # [추가] 스텝 카운터 1 증가
         obs = self._get_obs()
         pitch, x_vel, z_height = obs[0], obs[2], obs[3]
         base_orn = p.getBasePositionAndOrientation(self.robotId, physicsClientId=self.client)[1]
         roll = p.getEulerFromQuaternion(base_orn)[0]
         
         terminated = False
+        truncated = False # [추가] 타임아웃 종료 플래그
+
         reward = 1.0 
         reward += np.exp(-5.0 * pitch**2) * 3.0 
         reward += np.exp(-2.0 * x_vel**2) 
@@ -147,7 +152,12 @@ class Leg2WheelEnv(gym.Env):
             terminated = True
             reward = -20.0 
             
-        return obs, reward, terminated, False, {}
+        # [추가] 1000스텝(약 16초) 동안 버티면 성공으로 간주하고 환경 강제 리셋
+        if self.current_step >= 1000:
+            truncated = True
+            
+        # [수정] 4번째 반환값을 False에서 truncated 플래그로 변경
+        return obs, reward, terminated, truncated, {}
 
 def make_env(rank, seed=0):
     def _init():
@@ -187,7 +197,7 @@ if __name__ == "__main__":
         model = PPO("MlpPolicy", vec_env, verbose=1, learning_rate=0.0003, policy_kwargs=policy_kwargs)
     
     try:
-        model.learn(total_timesteps=5000, reset_num_timesteps=False, callback=checkpoint_callback)
+        model.learn(total_timesteps=500000, reset_num_timesteps=False, callback=checkpoint_callback)
         model.save(model_name)
         print(f"\n최종 학습 완료! {model_file} 저장됨.")
     except KeyboardInterrupt:
