@@ -29,7 +29,7 @@ class Leg2WheelEnv(gym.Env):
         self.client = p.connect(p.GUI if render else p.DIRECT)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         self.urdf_path = os.path.join(WORK_DIR, blueprint)
-        self.robotId = None
+        self.robotId = p.loadURDF(self.urdf_path, [0, 0, 0.75], useFixedBase=False, physicsClientId=self.client)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -49,7 +49,7 @@ class Leg2WheelEnv(gym.Env):
             p.changeDynamics(self.robotId, i, lateralFriction=1.5, physicsClientId=self.client)
             
         # [핵심 수정] 낙하하는 50프레임 동안 다리가 무너지지 않도록 0.55m 높이 자세로 모터 락(Lock)
-        target_height = 0.55
+        target_height = 0.71
         D = np.clip(target_height - 0.11, 0.01, 0.6)
         cos_val = np.clip((D**2 - 0.18) / 0.18, -1.0, 1.0)
         knee_target = -math.acos(cos_val)
@@ -82,7 +82,7 @@ class Leg2WheelEnv(gym.Env):
 
     def step(self, action):
         # [수정됨] 커리큘럼 1단계: 높이(action[0]) 제어를 무시하고 0.55m로 영구 고정
-        target_height = 0.55 
+        target_height = 0.71 
         # (참고) 2단계 학습 시 위 줄을 지우고 아래 줄의 주석을 해제하면 됩니다.
         # target_height = 0.485 + action[0] * 0.225 
         
