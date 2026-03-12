@@ -8,7 +8,7 @@ from train_2leg_wheel_v1 import Leg2WheelEnv
 
 # [설정] 경로 및 불러올 모델 이름
 WORK_DIR = r"C:\Users\juyk3\project\physical ai"
-save_name = "ppo_2leg_wheel_v1"
+save_name = "ppo_2leg_wheel_v2"
 model_path = os.path.join(WORK_DIR, save_name)
 
 # 1. 렌더링이 켜진(GUI) 테스트 환경 생성

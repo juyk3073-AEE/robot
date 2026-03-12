@@ -124,7 +124,7 @@ class Leg2WheelEnv(gym.Env):
         reward += np.exp(-2.0 * x_vel**2) 
         reward -= 0.01 * np.sum(np.square(action))
         
-        if abs(pitch) > 0.6 or abs(roll) > 0.5 or z_height < 0.15:
+        if abs(pitch) > 1.5 or abs(roll) > 1.5 or z_height < 0.01:
             terminated = True
             reward = -20.0 
             
@@ -168,7 +168,7 @@ if __name__ == "__main__":
         model = PPO("MlpPolicy", vec_env, verbose=1, learning_rate=0.0003, policy_kwargs=policy_kwargs)
     
     try:
-        model.learn(total_timesteps=50000, reset_num_timesteps=False, callback=checkpoint_callback)
+        model.learn(total_timesteps=5000, reset_num_timesteps=False, callback=checkpoint_callback)
         model.save(model_name)
         print(f"\n최종 학습 완료! {model_file} 저장됨.")
     except KeyboardInterrupt:
