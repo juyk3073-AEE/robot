@@ -195,12 +195,16 @@ if __name__ == "__main__":
     # 모델 저장명은 v3, 불러오는 과거 모델은 v2
     model_name = os.path.join(WORK_DIR, save_name)
     model_file = f"{model_name}.zip"
-    
-    # 전이 학습 (Transfer Learning)
-    print("-> 관측 센서 차원 증가(6차원)로 인해 백지 상태에서 신규 학습을 시작합니다.")
-    policy_kwargs = dict(activation_fn=torch.nn.Tanh, net_arch=[128, 128])
-    model = PPO("MlpPolicy", vec_env, verbose=1, learning_rate=0.0003, policy_kwargs=policy_kwargs)
-    
+      
+    # [수정] 파일 존재 여부 확인 후 로드 또는 신규 생성
+    if os.path.exists(model_file):
+        print(f"-> 기존 v4 모델({model_file})을 불러와서 이어서 학습합니다.")
+        model = PPO.load(model_file, env=vec_env)
+    else:
+        print("-> 기존 모델을 찾을 수 없어 백지 상태에서 신규 학습을 시작합니다.")
+        policy_kwargs = dict(activation_fn=torch.nn.Tanh, net_arch=[128, 128])
+        model = PPO("MlpPolicy", vec_env, verbose=1, learning_rate=0.0003, policy_kwargs=policy_kwargs)
+
     try:
         # 난이도가 높으므로 학습량을 500,000 스텝(50만 번)으로 상향
         model.learn(total_timesteps=500000, reset_num_timesteps=False, callback=checkpoint_callback)
