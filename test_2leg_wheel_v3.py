@@ -1,31 +1,21 @@
-# 다리 구부리고 중심잡기
-
-import gymnasium as gym
-from gymnasium import spaces
+import os
+import time
+import math
 import numpy as np
 import pybullet as p
 import pybullet_data
-import os
-import math
-import torch
+import gymnasium as gym
+from gymnasium import spaces
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import SubprocVecEnv
-from stable_baselines3.common.callbacks import CheckpointCallback
-from stable_baselines3.common.utils import set_random_seed
-from stable_baselines3.common.monitor import Monitor
 
-# [설정] 버전 v3 (동적 높이 변화 적응 학습)
 WORK_DIR = r"C:\Users\juyk3\project\physical ai"
 blueprint = "blueprint_2leg_wheel_v1.urdf"
 save_name = "ppo_2leg_wheel_v3"
-prev_model = "ppo_2leg_wheel_v2.zip" # 1단계 모델을 베이스로 사용
+model_path = os.path.join(WORK_DIR, save_name)
 
-CHECKPOINT_DIR = os.path.join(WORK_DIR, "checkpoints")
-LOG_DIR = os.path.join(WORK_DIR, "logs")
-
-class Leg2WheelEnv(gym.Env):
-    def __init__(self, render=False):
-        super(Leg2WheelEnv, self).__init__()
+class TestLeg2WheelEnv(gym.Env):
+    def __init__(self, render=True):
+        super(TestLeg2WheelEnv, self).__init__()
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(5,), dtype=np.float32)
         
@@ -51,7 +41,6 @@ class Leg2WheelEnv(gym.Env):
             self.joint_indices[name] = i
             p.changeDynamics(self.robotId, i, lateralFriction=1.5, physicsClientId=self.client)
             
-        # 스폰 시에는 충격 방지를 위해 다리를 편 상태(0.71)로 시작
         target_height = 0.71
         D = np.clip(target_height - 0.11, 0.01, 0.6)
         cos_val = np.clip((D**2 - 0.18) / 0.18, -1.0, 1.0)
@@ -86,11 +75,6 @@ class Leg2WheelEnv(gym.Env):
             p.resetBasePositionAndOrientation(self.robotId, [0, 0, pos[2]], [0, 0, 0, 1], physicsClientId=self.client)
             p.resetBaseVelocity(self.robotId, [0, 0, 0], [0, 0, 0], physicsClientId=self.client)
             
-        # [추가] 에피소드 루프 제어용 변수
-        self.current_step = 0
-        # 사인파가 1.0 (높이 0.71m)부터 부드럽게 시작하도록 위상(Phase) 설정
-        self.time_step = math.pi / 2.0 
-        
         return self._get_obs(), {}
 
     def _get_obs(self):
@@ -104,13 +88,7 @@ class Leg2WheelEnv(gym.Env):
         ], dtype=np.float32)
 
     def step(self, action):
-        self.current_step += 1
-        self.time_step += 0.02 # 주기 속도 조절 (약 5초마다 앉았다 일어남 반복)
-        
-        # [핵심] 사용자가 슬라이더를 흔드는 상황을 시스템적으로 구현
-        sine_wave = math.sin(self.time_step)
-        target_height = 0.485 + (sine_wave * 0.225) # 0.26m ~ 0.71m 강제 왕복
-        
+        target_height = 0.485 + action[0] * 0.225
         wheel_vel = action[1] * 20.0
         
         D = np.clip(target_height - 0.11, 0.01, 0.6)
@@ -138,82 +116,59 @@ class Leg2WheelEnv(gym.Env):
         for _ in range(4):
             p.stepSimulation(physicsClientId=self.client)
         
-        # 1. 관측값에서 Pitch 각속도(pitch_vel) 변수 추가 추출
         obs = self._get_obs()
-        pitch, pitch_vel, x_vel, z_height = obs[0], obs[1], obs[2], obs[3] 
+        pitch, x_vel, z_height = obs[0], obs[2], obs[3]
         base_orn = p.getBasePositionAndOrientation(self.robotId, physicsClientId=self.client)[1]
         roll = p.getEulerFromQuaternion(base_orn)[0]
         
         terminated = False
-        truncated = False
-        
-        # 2. 보상 함수 수정 (동적 밸런싱 유도)
         reward = 1.0 
-        # 절대 각도 0도 강제성을 대폭 완화 (스스로 누울 수 있도록 허용)
-        reward += np.exp(-1.0 * pitch**2) * 1.0  
-        # 몸통이 앞뒤로 요동치는 것을 억제 (안정화 유도)
-        reward += np.exp(-2.0 * pitch_vel**2) * 2.0  
-        # 무게중심이 무너져 앞으로 굴러가는 현상을 강하게 억제
-        reward += np.exp(-5.0 * x_vel**2) * 2.0  
-        reward -= 0.01 * np.sum(np.square(action))
         
         if abs(pitch) > 1.5 or abs(roll) > 1.5 or z_height < 0.01:
             terminated = True
             reward = -20.0 
             
-        # [추가] 1000스텝(약 16초) 동안 스쿼트를 버티면 성공(타임아웃 리셋)
-        if self.current_step >= 1000:
-            truncated = True
-            
-        return obs, reward, terminated, truncated, {}
-
-def make_env(rank, seed=0):
-    def _init():
-        env = Leg2WheelEnv(render=False)
-        env = Monitor(env, os.path.join(LOG_DIR, str(rank))) 
-        env.reset(seed=seed + rank)
-        return env
-    set_random_seed(seed)
-    return _init
+        return obs, reward, terminated, False, {}
 
 if __name__ == "__main__":
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    os.makedirs(LOG_DIR, exist_ok=True)
+    test_env = TestLeg2WheelEnv(render=True)
+    obs, _ = test_env.reset()
 
-    num_cpu = max(1, os.cpu_count() // 2)
-    torch.set_num_threads(1) 
-    
-    print(f"[{num_cpu} 코어 할당] Phase 2: 스쿼트 주행(동적 높이 변화) 밸런싱 학습 시작.")
-    
-    vec_env = SubprocVecEnv([make_env(i) for i in range(num_cpu)])
-    
-    checkpoint_callback = CheckpointCallback(
-        save_freq=10000 // num_cpu, 
-        save_path=CHECKPOINT_DIR,
-        name_prefix=save_name
-    )
-    
-    # 모델 저장명은 v3, 불러오는 과거 모델은 v2
-    model_name = os.path.join(WORK_DIR, save_name)
-    model_file = f"{model_name}.zip"
-    prev_model_path = os.path.join(WORK_DIR, prev_model)
-    
-    # 전이 학습 (Transfer Learning)
-    if os.path.exists(model_file):
-        print(f"-> 기존 2단계 모델({model_file})을 이어서 추가 학습합니다.")
-        model = PPO.load(model_file, env=vec_env)
-    elif os.path.exists(prev_model_path):
-        print(f"-> 1단계 완성 모델({prev_model})의 뇌를 이식하여 2단계 학습을 시작합니다.")
-        model = PPO.load(prev_model_path, env=vec_env)
+    print(f"{model_path}.zip 모델을 불러옵니다...")
+    if os.path.exists(model_path + ".zip"):
+        model = PPO.load(model_path)
     else:
-        print("-> [주의] 1단계 모델을 찾을 수 없어 백지 상태에서 신규 학습을 시작합니다.")
-        policy_kwargs = dict(activation_fn=torch.nn.Tanh, net_arch=[128, 128])
-        model = PPO("MlpPolicy", vec_env, verbose=1, learning_rate=0.0003, policy_kwargs=policy_kwargs)
-    
-    try:
-        # 난이도가 높으므로 학습량을 500,000 스텝(50만 번)으로 상향
-        model.learn(total_timesteps=500000, reset_num_timesteps=False, callback=checkpoint_callback)
-        model.save(model_name)
-        print(f"\n최종 학습 완료! {model_file} 저장됨.")
-    except KeyboardInterrupt:
-        print("\n학습 중지됨.")
+        print("모델 파일을 찾을 수 없습니다. 경로를 확인하세요.")
+        exit()
+
+    mode_slider = p.addUserDebugParameter("Manual Height Override (0=AI, 1=Manual)", 0, 1, 1)
+    height_slider = p.addUserDebugParameter("Target Body Height (m)", 0.26, 0.71, 0.71)
+
+    print("\nAI 제어 시작! 슬라이더를 움직여보세요. (스무딩 필터 적용됨)")
+
+    # [핵심] 현재 위치를 기억할 스무딩 변수 초기화 (초기 스폰 높이 0.71m 적용)
+    current_smoothed_height = 0.71
+    # 스무딩 계수: 1.0이면 즉각 이동, 0에 가까울수록 느리고 부드럽게 보간됨
+    alpha = 0.03 
+
+    while True:
+        action, _states = model.predict(obs, deterministic=True)
+        
+        manual_mode = p.readUserDebugParameter(mode_slider)
+        raw_target_height = p.readUserDebugParameter(height_slider)
+        
+        # [핵심] 지수 이동 평균(EMA)을 이용한 높이 보간 연산
+        current_smoothed_height += (raw_target_height - current_smoothed_height) * alpha
+        
+        if manual_mode >= 0.5:
+            # 부드럽게 변환된 높이 값을 AI 액션으로 역산
+            action[0] = (current_smoothed_height - 0.485) / 0.225
+            
+        obs, reward, done, _, _ = test_env.step(action)
+        time.sleep(1./60.) 
+        
+        if done:
+            print("로봇이 균형을 잃고 쓰러졌습니다. 리셋합니다.")
+            obs, _ = test_env.reset()
+            # 쓰러진 후 리셋 시 스무딩 변수도 원위치 복구
+            current_smoothed_height = 0.71
