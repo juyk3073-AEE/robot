@@ -10,7 +10,7 @@ from stable_baselines3 import PPO
 
 WORK_DIR = r"C:\Users\juyk3\project\physical ai"
 blueprint = "blueprint_2leg_wheel_v1.urdf"
-save_name = "ppo_2leg_wheel_v3"
+save_name = "ppo_2leg_wheel_v4"
 model_path = os.path.join(WORK_DIR, save_name)
 
 class TestLeg2WheelEnv(gym.Env):
@@ -118,7 +118,7 @@ class TestLeg2WheelEnv(gym.Env):
             p.stepSimulation(physicsClientId=self.client)
         
         obs = self._get_obs()
-        pitch, x_vel, z_height = obs[0], obs[2], obs[3]
+        pitch, x_vel, z_height = obs[0], obs[3], obs[4]
         base_orn = p.getBasePositionAndOrientation(self.robotId, physicsClientId=self.client)[1]
         roll = p.getEulerFromQuaternion(base_orn)[0]
         
