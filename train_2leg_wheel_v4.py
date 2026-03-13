@@ -195,7 +195,6 @@ if __name__ == "__main__":
     # 모델 저장명은 v3, 불러오는 과거 모델은 v2
     model_name = os.path.join(WORK_DIR, save_name)
     model_file = f"{model_name}.zip"
-    prev_model_path = os.path.join(WORK_DIR, prev_model)
     
     # 전이 학습 (Transfer Learning)
     print("-> 관측 센서 차원 증가(6차원)로 인해 백지 상태에서 신규 학습을 시작합니다.")
