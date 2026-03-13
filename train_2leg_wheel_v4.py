@@ -17,8 +17,7 @@ from stable_baselines3.common.monitor import Monitor
 # [설정] 버전 v3 (동적 높이 변화 적응 학습)
 WORK_DIR = r"C:\Users\juyk3\project\physical ai"
 blueprint = "blueprint_2leg_wheel_v1.urdf"
-save_name = "ppo_2leg_wheel_v3"
-prev_model = "ppo_2leg_wheel_v2.zip" # 1단계 모델을 베이스로 사용
+save_name = "ppo_2leg_wheel_v4"
 
 CHECKPOINT_DIR = os.path.join(WORK_DIR, "checkpoints")
 LOG_DIR = os.path.join(WORK_DIR, "logs")
