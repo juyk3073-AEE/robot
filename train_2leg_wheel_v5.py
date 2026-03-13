@@ -1,5 +1,3 @@
-# 다리 구부리고 중심잡기 & 현재 위치로 복귀(부족 감쇄)
-
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -7,6 +5,7 @@ import pybullet as p
 import pybullet_data
 import os
 import math
+import random
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv
@@ -14,11 +13,10 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.monitor import Monitor
 
-# [설정] 버전 v3 (동적 높이 변화 적응 학습)
 WORK_DIR = r"C:\Users\juyk3\project\physical ai"
 blueprint = "blueprint_2leg_wheel_v1.urdf"
-save_name = "ppo_2leg_wheel_v4"
-
+save_name = "ppo_2leg_wheel_v5"
+pre_model = "ppo_2leg_wheel_v4.zip"
 CHECKPOINT_DIR = os.path.join(WORK_DIR, "checkpoints")
 LOG_DIR = os.path.join(WORK_DIR, "logs")
 
@@ -26,6 +24,7 @@ class Leg2WheelEnv(gym.Env):
     def __init__(self, render=False):
         super(Leg2WheelEnv, self).__init__()
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+        # 6차원 유지: pitch, pitch_vel, x_vel, z_height, z_vel, cmd_vel
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32)
 
         self.client = p.connect(p.GUI if render else p.DIRECT)
@@ -50,7 +49,6 @@ class Leg2WheelEnv(gym.Env):
             self.joint_indices[name] = i
             p.changeDynamics(self.robotId, i, lateralFriction=1.5, physicsClientId=self.client)
             
-        # 스폰 시에는 충격 방지를 위해 다리를 편 상태(0.71)로 시작
         target_height = 0.71
         D = np.clip(target_height - 0.11, 0.01, 0.6)
         cos_val = np.clip((D**2 - 0.18) / 0.18, -1.0, 1.0)
@@ -85,10 +83,11 @@ class Leg2WheelEnv(gym.Env):
             p.resetBasePositionAndOrientation(self.robotId, [0, 0, pos[2]], [0, 0, 0, 1], physicsClientId=self.client)
             p.resetBaseVelocity(self.robotId, [0, 0, 0], [0, 0, 0], physicsClientId=self.client)
             
-        # [추가] 에피소드 루프 제어용 변수
         self.current_step = 0
-        # 사인파가 1.0 (높이 0.71m)부터 부드럽게 시작하도록 위상(Phase) 설정
         self.time_step = math.pi / 2.0 
+        
+        # [핵심] 에피소드 시작 시 랜덤 목표 속도 부여 (-3m/s ~ +3m/s)
+        self.cmd_vel = random.uniform(-10.0, 10.0)
         
         return self._get_obs(), {}
 
@@ -99,18 +98,22 @@ class Leg2WheelEnv(gym.Env):
         
         return np.array([
             base_euler[1], base_ang_vel[1], 
-            base_pos[0], base_vel[0], # [추가] base_pos[0] (X축 절대 위치 센서)
-            base_pos[2], base_vel[2]
+            self.cmd_vel, base_vel[0],  # [핵심] x_pos 자리에 정확히 cmd_vel을 삽입. x_vel은 4번째(인덱스3) 유지.
+            base_pos[2], base_vel[2]    # z_height와 z_vel도 예전 인덱스(4, 5) 유지.
         ], dtype=np.float32)
 
     def step(self, action):
         self.current_step += 1
-        self.time_step += 0.02 # 주기 속도 조절 (약 5초마다 앉았다 일어남 반복)
+        self.time_step += 0.02 
         
-        # [핵심] 사용자가 슬라이더를 흔드는 상황을 시스템적으로 구현
+        # 주행 중에도 높이 변화(외란) 동시 극복 훈련 유지
         sine_wave = math.sin(self.time_step)
-        target_height = 0.485 + (sine_wave * 0.225) # 0.26m ~ 0.71m 강제 왕복
+        target_height = 0.485 + (sine_wave * 0.225) 
         
+        # 150스텝(약 2.5초)마다 AI에게 새로운 주행 속도를 요구하여 감감속/방향전환 훈련
+        if self.current_step % 150 == 0:
+            self.cmd_vel = random.uniform(-10.0, 10.0)
+            
         wheel_vel = action[1] * 20.0
         
         D = np.clip(target_height - 0.11, 0.01, 0.6)
@@ -138,29 +141,30 @@ class Leg2WheelEnv(gym.Env):
         for _ in range(4):
             p.stepSimulation(physicsClientId=self.client)
         
-        # 1. 관측값 언패킹 변수 수정 (x_pos 추가)
+        # ... (step 내부 물리 시뮬레이션 연산 후) ...
         obs = self._get_obs()
-        pitch, pitch_vel, x_pos, x_vel, z_height = obs[0], obs[1], obs[2], obs[3], obs[4]
+        # obs[2]는 이제 cmd_vel이므로 제외하고, x_vel을 obs[3]으로, z_height를 obs[4]로 정확히 매칭
+        pitch, pitch_vel, x_vel, z_height = obs[0], obs[1], obs[3], obs[4]
         base_orn = p.getBasePositionAndOrientation(self.robotId, physicsClientId=self.client)[1]
         roll = p.getEulerFromQuaternion(base_orn)[0]
         
         terminated = False
         truncated = False
         
-        # 2. 보상 함수 수정 (위치 복원력 추가)
+        # [핵심] 속도 추종(Velocity Tracking) 보상 함수
+        vel_error = x_vel - self.cmd_vel
+        
         reward = 1.0 
         reward += np.exp(-1.0 * pitch**2) * 1.0  
         reward += np.exp(-2.0 * pitch_vel**2) * 2.0  
-        # [핵심] X축 원점(0)에서 멀어질수록 강한 패널티 부여 (가상의 스프링 복원력 역할)
-        reward += np.exp(-1.0 * x_pos**2) * 3.0  
-        reward += np.exp(-3.0 * x_vel**2) * 2.0  
+        # 현재 속도와 목표 속도의 오차가 0에 가까울수록 5.0점의 큰 보상 부여
+        reward += np.exp(-2.0 * vel_error**2) * 5.0  
         reward -= 0.01 * np.sum(np.square(action))
         
         if abs(pitch) > 1.5 or abs(roll) > 1.5 or z_height < 0.01:
             terminated = True
             reward = -20.0 
             
-        # [추가] 1000스텝(약 16초) 동안 스쿼트를 버티면 성공(타임아웃 리셋)
         if self.current_step >= 1000:
             truncated = True
             
@@ -182,33 +186,34 @@ if __name__ == "__main__":
     num_cpu = max(1, os.cpu_count() // 2)
     torch.set_num_threads(1) 
     
-    print(f"[{num_cpu} 코어 할당] Phase 2: 스쿼트 주행(동적 높이 변화) 밸런싱 학습 시작.")
+    print(f"[{num_cpu} 코어 할당] Phase 3(v5): 전진 및 후진 주행 속도 추종 학습 시작.")
     
     vec_env = SubprocVecEnv([make_env(i) for i in range(num_cpu)])
     
     checkpoint_callback = CheckpointCallback(
-        save_freq=10000 // num_cpu, 
+        save_freq=100000 // num_cpu, 
         save_path=CHECKPOINT_DIR,
         name_prefix=save_name
     )
     
-    # 모델 저장명은 v3, 불러오는 과거 모델은 v2
     model_name = os.path.join(WORK_DIR, save_name)
     model_file = f"{model_name}.zip"
-      
-    # [수정] 파일 존재 여부 확인 후 로드 또는 신규 생성
+    v4_model_path = os.path.join(WORK_DIR, pre_model) # v4 경로 추가
+    
     if os.path.exists(model_file):
-        print(f"-> 기존 v4 모델({model_file})을 불러와서 이어서 학습합니다.")
+        print(f"-> 기존 v5 모델({model_file})을 불러와서 이어서 학습합니다.")
         model = PPO.load(model_file, env=vec_env)
+    elif os.path.exists(v4_model_path): # v4 연동 로직 추가
+        print("-> [전이학습] v4 모델의 밸런싱 뇌를 바탕으로 v5(속도 추종) 학습을 시작합니다.")
+        model = PPO.load(v4_model_path, env=vec_env)
     else:
         print("-> 기존 모델을 찾을 수 없어 백지 상태에서 신규 학습을 시작합니다.")
         policy_kwargs = dict(activation_fn=torch.nn.Tanh, net_arch=[128, 128])
         model = PPO("MlpPolicy", vec_env, verbose=1, learning_rate=0.0003, policy_kwargs=policy_kwargs)
 
-    try:
-        # 난이도가 높으므로 학습량을 500,000 스텝(50만 번)으로 상향
+    try: 
         model.learn(total_timesteps=500000, reset_num_timesteps=False, callback=checkpoint_callback)
         model.save(model_name)
-        print(f"\n최종 학습 완료! {model_file} 저장됨.")
+        print(f"\n최종 학습 완료! {model_file} 저장됨. 종료합니다.")
     except KeyboardInterrupt:
         print("\n학습 중지됨.")
